@@ -49,7 +49,7 @@ const Chatbot = () => {
         newHist[newHist.length - 1] = { user: userMsg, assistant: data.answer };
         return newHist;
       });
-    } catch (err) {
+    } catch {
       setError("Something went wrong. Please try again.");
       setHistory((h) => h.slice(0, -1)); // Remove the placeholder
     } finally {

@@ -1,0 +1,21 @@
+fastapi
+uvicorn
+langchain
+chromadb
+python-dotenv
+pypdf
+docx2txt
+python-docx
+python-multipart
+pandas
+openai
+httpx
+# For Gemini 2 Flash, use the official Google GenerativeAI client if available:
+google-generativeai 
+langchain-community
+langchain-openai 
+langchain-chroma
+watchdog 
+beautifulsoup4
+requests 
+playwright 

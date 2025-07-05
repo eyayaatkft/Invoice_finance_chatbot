@@ -1,6 +1,6 @@
 "use client";
 import { Search } from "lucide-react";
-//import Sidebar from "./Sidebar";
+import Sidebar from "./Sidebar";
 import dynamic from "next/dynamic";
 import React from "react";
 
@@ -9,7 +9,7 @@ const Chatbot = dynamic(() => import("./Chatbot"), { ssr: false });
 export default function HelpAndSupportPage() {
   return (
     <div className="min-h-screen flex bg-gray-50">
-      
+      <Sidebar active="Help and Support" />
       <main className="flex-1 flex flex-col px-0 md:px-8 py-0 md:py-8">
         <div className="max-w-6xl w-full mx-auto rounded-2xl bg-white shadow-sm p-0 md:p-10 min-h-screen">
           <div className="flex flex-col items-center pt-10">

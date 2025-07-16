@@ -1,6 +1,7 @@
 "use client";
 import { MessageCircle } from "lucide-react";
 import React, { useState, useEffect, useRef } from "react";
+import ChatMessage from "./ChatMessage";
 
 interface ChatTurn {
   user: string;
@@ -78,16 +79,8 @@ const Chatbot = () => {
             {history.length === 0 && <div className="text-gray-400 text-center">No conversation yet.</div>}
             {history.map((turn, idx) => (
               <React.Fragment key={idx}>
-                <div className="text-right">
-                  <div className="inline-block bg-purple-100 text-gray-900 px-4 py-2 rounded-lg mb-1 max-w-xs">
-                    {turn.user}
-                  </div>
-                </div>
-                <div className="text-left">
-                  <div className="inline-block bg-purple-50 text-gray-900 px-4 py-2 rounded-lg mb-3 max-w-xs">
-                    {turn.assistant}
-                  </div>
-                </div>
+                <ChatMessage message={turn.user} sender="user" />
+                <ChatMessage message={turn.assistant} sender="assistant" />
               </React.Fragment>
             ))}
             <div ref={chatEndRef} />

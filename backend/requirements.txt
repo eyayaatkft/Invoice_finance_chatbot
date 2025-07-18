@@ -18,4 +18,5 @@ langchain-chroma
 watchdog 
 beautifulsoup4
 requests 
-playwright 
+playwright
+groq

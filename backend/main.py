@@ -23,6 +23,8 @@ from playwright.sync_api import sync_playwright
 from playwright.async_api import async_playwright
 from groq import Groq
 import os
+import hashlib
+from fastapi.middleware.cors import CORSMiddleware
 
 # --- Load environment variables ---
 load_dotenv()
@@ -42,11 +44,65 @@ DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../data'))
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # For development; restrict in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 vector_store = None  # Will hold Chroma instance
 
 TRACKING_FILE = os.path.join(os.path.dirname(__file__), "embedded_files.json")
 
 CHAT_HISTORY_FILE = os.path.join(os.path.dirname(__file__), "chat_history.json")
+
+VECTOR_STORES_DIR = os.path.join(os.path.dirname(__file__), "vector_stores")
+os.makedirs(VECTOR_STORES_DIR, exist_ok=True)
+
+ACTIVE_KB_FILE = os.path.join(os.path.dirname(__file__), "active_kb.json")
+
+def set_active_knowledge_base_url(url: str):
+    with open(ACTIVE_KB_FILE, "w") as f:
+        pyjson.dump({"active_url": url}, f)
+
+def get_active_knowledge_base_url() -> str:
+    if os.path.exists(ACTIVE_KB_FILE):
+        with open(ACTIVE_KB_FILE, "r") as f:
+            data = pyjson.load(f)
+            return data.get("active_url", "")
+    return ""
+
+def url_to_store_name(url: str) -> str:
+    return hashlib.sha256(url.encode()).hexdigest()[:16]
+
+# --- Chat History Utilities (Per-URL) ---
+def get_chat_history_file(url: str) -> str:
+    store_name = url_to_store_name(url)
+    return os.path.join(os.path.dirname(__file__), f"chat_history_{store_name}.json")
+
+def load_chat_history(url: str):
+    file = get_chat_history_file(url)
+    if os.path.exists(file):
+        with open(file, "r") as f:
+            return pyjson.load(f)
+    return []
+
+def save_chat_history(url: str, history):
+    file = get_chat_history_file(url)
+    with open(file, "w") as f:
+        pyjson.dump(history, f)
+
+def get_vector_store_for_url(url: str):
+    store_name = url_to_store_name(url)
+    store_dir = os.path.join(VECTOR_STORES_DIR, store_name)
+    embeddings = OpenAIEmbeddings()  # Use the same embedding model
+    return Chroma(
+        collection_name="rag_docs",
+        embedding_function=embeddings,
+        persist_directory=store_dir
+    )
 
 # --- Utility Functions ---
 def load_document(filepath):
@@ -90,16 +146,6 @@ def get_file_mtime(filepath):
 def get_now_timestamp():
     import time
     return str(int(time.time()))
-
-def load_chat_history():
-    if os.path.exists(CHAT_HISTORY_FILE):
-        with open(CHAT_HISTORY_FILE, "r") as f:
-            return pyjson.load(f)
-    return []
-
-def save_chat_history(history):
-    with open(CHAT_HISTORY_FILE, "w") as f:
-        pyjson.dump(history, f)
 
 # --- ChromaDB Initialization ---
 def get_vector_store():
@@ -155,13 +201,14 @@ def remove_file(filepath):
     print(f"[Removed] {filepath} from vector store. Deleted vectors: {deleted}")
 
 # --- Ingestion Logic (URLs) ---
-async def ingest_url(base_url, max_pages=100, max_depth=3):
+async def ingest_url(main_url, max_pages=100, max_depth=3):
     visited = set()
-    queue = [(base_url, 0)]
-    domain = urlparse(base_url).netloc
+    queue = [(main_url, 0)]
+    domain = urlparse(main_url).netloc
     tracking = load_tracking()
     now = get_now_timestamp()
     page_count = 0
+    store = get_vector_store_for_url(main_url)  # Always use main_url
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -176,24 +223,20 @@ async def ingest_url(base_url, max_pages=100, max_depth=3):
                 await page.wait_for_load_state("networkidle")
                 html = await page.content()
                 soup = BeautifulSoup(html, "html.parser")
-                # Extract visible text
                 for script in soup(["script", "style", "noscript"]):
                     script.extract()
                 text = soup.get_text(separator="\n")
                 lines = [line.strip() for line in text.splitlines() if line.strip()]
                 page_text = "\n".join(lines)
                 print(f"[Crawl] {url} - {len(page_text)} chars")
-                # Ingest as before
                 from langchain.schema import Document
                 doc = Document(page_content=page_text, metadata={"source_url": url})
                 chunks = chunk_documents([doc])
-                vs = get_vector_store()
                 texts = [chunk.page_content for chunk in chunks]
                 metadatas = [{**chunk.metadata, "source_url": url} for chunk in chunks]
-                vs.add_texts(texts, metadatas)
-                tracking["urls"][url] = now
+                store.add_texts(texts, metadatas)  # Always use the main_url's store
+                tracking["urls"][main_url] = now
                 page_count += 1
-                # Find and enqueue new internal links
                 for a in soup.find_all("a", href=True):
                     link = urljoin(url, a["href"])
                     parsed = urlparse(link)
@@ -206,6 +249,7 @@ async def ingest_url(base_url, max_pages=100, max_depth=3):
                 continue
         await browser.close()
     save_tracking(tracking)
+    set_active_knowledge_base_url(main_url)
     print(f"[Crawl] Finished. {page_count} pages ingested.")
     return {"success": True, "pages_ingested": page_count, "visited": list(visited)}
 
@@ -251,18 +295,21 @@ def retrieve_context(question, k=4):
 def build_prompt(question, docs, chat_history=None):
     context = "\n\n".join([doc.page_content for doc in docs])
     history_str = ""
-    
     if chat_history:
         for turn in chat_history[-5:]:
             history_str += f"User: {turn['user']}\nKifiya General Support Assistant: {turn['assistant']}\n"
-    
+
     prompt = f"""
 You are Kifiya General Support Assistant — a helpful and knowledgeable assistant trained to support users based strictly on Kifiya’s official help and support knowledge base.
 
-Respond to the user's question using only the information provided in the context below. Do **not** mention that the response is based on a context or document. Speak clearly and conversationally, as if you're chatting naturally with the user.
+The user is asking about: "{question}"
 
-If the answer is not present in the context, say:  
-"I'm not sure about that — you can contact us" and give the contacts from the knowledge base.
+Your job is to answer the user's question as specifically and helpfully as possible, using only the information provided in the context below. If the context contains multiple topics, focus only on what is most relevant to the user's question.
+
+If the answer is not present in the context, say:
+"I'm not sure about that — you can contact us at support@kifiya.com or call +251-11-123-4567 for more help."
+
+**Do NOT mention that you are using a context, document, or knowledge base. Do NOT make up answers.**
 
 Context:
 {context}
@@ -271,7 +318,7 @@ Chat History:
 {history_str}
 User: {question}
 Kifiya General Support Assistant:"""
-    
+
     return prompt
 
 
@@ -312,28 +359,94 @@ async def call_groq(prompt, chat_history, temperature=0.7, max_output_tokens=102
     )
 
     return response.choices[0].message.content
+
+def extract_json_from_response(response: str):
+    import re, json
+    # Try to find JSON inside triple backticks
+    match = re.search(r"```(?:json)?\\s*([\s\S]+?)\\s*```", response)
+    if match:
+        json_str = match.group(1)
+    else:
+        # Fallback: try to find the first { or [ and parse from there
+        start = min(
+            [i for i in [response.find("["), response.find("{")] if i != -1] or [0]
+        )
+        json_str = response[start:]
+    return json.loads(json_str)
+
+def to_pascal_case(s):
+    s = s.replace("lucide:", "")
+    return ''.join(word.capitalize() for word in s.replace('-', ' ').split())
+
+@app.get("/help-themes")
+async def help_themes(url: str):
+    store = get_vector_store_for_url(url)
+    # Sample up to 100 documents from the vector store
+    sample = store._collection.get(limit=100)
+    texts = sample.get('documents', [])
+    if not texts:
+        print(f"[HelpThemes] No content found for URL: {url}")
+        return {"themes": []}
+    # Use only the first 20 for prompt brevity
+    content_sample = '\n'.join(texts[:20])
+    prompt = f"""
+Analyze the following support content. Identify up to 6 key themes or categories.
+For each theme, provide:
+- A short label (max 2 words)
+- A Lucide React icon component name (e.g., ShoppingCart, CreditCard, Users)
+- A concise, user-friendly snippet summarizing the theme
+Return ONLY a JSON array of these objects, with no extra text, markdown, or explanations. Do not wrap in markdown or add any commentary.
+Content sample:
+{content_sample}
+"""
+    response = client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=1024
+        )
+    raw = response.choices[0].message.content.strip()
+    try:
+        themes = extract_json_from_response(raw)
+        # Post-process icon names to PascalCase
+        for theme in themes:
+            if 'icon' in theme:
+                theme['icon'] = to_pascal_case(theme['icon'])
+        print("Themes: ",themes)
+    except Exception as e:
+        print(f"[HelpThemes] Failed to parse Groq response: {e}\nRaw: {raw}")
+        themes = []
+    return {"themes": themes}
+
 class ChatRequest(BaseModel):
     question: str
+    url: str
     temperature: float = 0.5
     max_output_tokens: int = 1000
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
     question = request.question
+    url = request.url
     temperature = request.temperature
     max_output_tokens = request.max_output_tokens
-    chat_history = load_chat_history()
-    docs = retrieve_context(question)
+    chat_history = load_chat_history(url)
+    store = get_vector_store_for_url(url)
+    docs_and_scores = store.similarity_search_with_score(question, k=4)
+    docs = [doc for doc, score in docs_and_scores]
+    print(f"[DEBUG] Question: {question}")
+    print(f"[DEBUG] Top docs (first 100 chars each): {[doc.page_content[:100] for doc in docs]}")
     prompt = build_prompt(question, docs, chat_history)
+    print(f"[DEBUG] Prompt (first 500 chars): {prompt[:500]}")
     answer = await call_groq(prompt, chat_history, temperature, max_output_tokens)
     sources = [doc.metadata.get("source_file", "") for doc in docs]
     chat_history.append({"user": question, "assistant": answer})
-    save_chat_history(chat_history)
+    save_chat_history(url, chat_history)
     return {"answer": answer, "sources": sources}
 
 @app.get("/chat/history")
-def get_chat_history():
-    return load_chat_history()
+def get_chat_history(url: str):
+    return load_chat_history(url)
 
 # --- Management Endpoints ---
 @app.get("/knowledge/list")
@@ -379,59 +492,3 @@ async def upload_file(file: UploadFile):
     except Exception as e:
         print(f"[Upload Error] {e}")
         return {"success": False, "error": str(e)}
-
-def extract_json_from_response(response: str):
-    import re, json
-    # Try to find JSON inside triple backticks
-    match = re.search(r"```(?:json)?\\s*([\s\S]+?)\\s*```", response)
-    if match:
-        json_str = match.group(1)
-    else:
-        # Fallback: try to find the first { or [ and parse from there
-        start = min(
-            [i for i in [response.find("["), response.find("{")] if i != -1] or [0]
-        )
-        json_str = response[start:]
-    return json.loads(json_str)
-
-def to_pascal_case(s):
-    s = s.replace("lucide:", "")
-    return ''.join(word.capitalize() for word in s.replace('-', ' ').split())
-
-@app.get("/help-themes")
-async def help_themes():
-    vs = get_vector_store()
-    # Sample up to 100 documents from the vector store
-    sample = vs._collection.get(limit=100)
-    texts = sample.get('documents', [])
-    # Use only the first 20 for prompt brevity
-    content_sample = '\n'.join(texts[:20])
-    prompt = f"""
-Analyze the following support content. Identify 5-7 key themes or categories.
-For each theme, provide:
-- A short label (max 2 words)
-- A Lucide React icon component name (e.g., ShoppingCart, CreditCard, Users)
-- A concise, user-friendly snippet summarizing the theme
-- A list of representative document titles or first lines
-Return ONLY a JSON array of these objects, with no extra text, markdown, or explanations. Do not wrap in markdown or add any commentary.
-Content sample:
-{content_sample}
-"""
-    response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=1024
-        )
-    raw = response.choices[0].message.content.strip()
-    try:
-        themes = extract_json_from_response(raw)
-        # Post-process icon names to PascalCase
-        for theme in themes:
-            if 'icon' in theme:
-                theme['icon'] = to_pascal_case(theme['icon'])
-        print("Themes: ",themes)
-    except Exception as e:
-        print(f"[HelpThemes] Failed to parse Groq response: {e}\nRaw: {raw}")
-        themes = []
-    return {"themes": themes}

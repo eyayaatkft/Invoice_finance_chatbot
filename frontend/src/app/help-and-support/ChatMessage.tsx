@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { motion } from 'framer-motion';
 
 interface ChatMessageProps {
   message: string;
@@ -8,12 +9,23 @@ interface ChatMessageProps {
 }
 
 const ChatMessage: React.FC<ChatMessageProps> = ({ message, sender }) => {
+  const isUser = sender === 'user';
   return (
-    <div className={`w-full my-2 ${sender === 'user' ? 'text-right' : 'text-left'}`}>
-      <div
-        className={`inline-block px-4 py-2 rounded-lg ${
-          sender === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-800'
-        } max-w-xl`}
+    <div className={`w-full my-3 flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4, type: 'spring' }}
+        className={`relative px-5 py-3 rounded-2xl max-w-xl shadow-md group transition-all duration-300
+          ${isUser
+            ? 'bg-gradient-to-tr from-primary to-secondary text-white self-end rounded-br-md hover:shadow-xl'
+            : 'bg-white border border-primary text-gray-900 self-start hover:shadow-lg'}
+        `}
+        style={{
+          boxShadow: isUser
+            ? '0 4px 16px 0 rgba(3,81,99,0.10)'
+            : '0 2px 8px 0 rgba(3,81,99,0.08)'
+        }}
       >
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
@@ -24,12 +36,12 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message, sender }) => {
             li: ({ children }) => <li className="mb-1">{children}</li>,
             code: ({ children }) => <code className="bg-gray-200 rounded px-1">{children}</code>,
             pre: ({ children }) => <pre className="bg-gray-200 rounded p-2 overflow-x-auto">{children}</pre>,
-            a: ({ children, href }) => <a href={href} className="text-blue-600 underline">{children}</a>,
+            a: ({ children, href }) => <a href={href} className="text-secondary underline">{children}</a>,
           }}
         >
           {message}
         </ReactMarkdown>
-      </div>
+      </motion.div>
     </div>
   );
 };
